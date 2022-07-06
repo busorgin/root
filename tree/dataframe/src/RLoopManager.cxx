@@ -301,6 +301,14 @@ DatasetLogInfo TreeDatasetLogInfo(const TTreeReader &r, unsigned int slot)
    return {std::move(what), static_cast<ULong64_t>(entryRange.first), end, slot};
 }
 
+static auto MakeDatasetColReadersKey(const std::string &colName, const std::type_info &ti)
+{
+   // We use a combination of column name and column type name as the key because in some cases we might end up
+   // with concrete readers that use different types for the same column, e.g. std::vector and RVec here:
+   //    df.Sum<vector<int>>("stdVectorBranch");
+   //    df.Sum<RVecI>("stdVectorBranch");
+   return colName + ':' + ti.name();
+}
 } // anonymous namespace
 
 namespace ROOT {
@@ -340,21 +348,21 @@ RLoopManager::RLoopManager(TTree *tree, const ColumnNames_t &defaultBranches)
    : fTree(std::shared_ptr<TTree>(tree, [](TTree *) {})), fDefaultColumns(defaultBranches),
      fNSlots(RDFInternal::GetNSlots()),
      fLoopType(ROOT::IsImplicitMTEnabled() ? ELoopType::kROOTFilesMT : ELoopType::kROOTFiles),
-     fNewSampleNotifier(fNSlots), fSampleInfos(fNSlots)
+     fNewSampleNotifier(fNSlots), fSampleInfos(fNSlots), fDatasetColumnReaders(fNSlots)
 {
 }
 
 RLoopManager::RLoopManager(ULong64_t nEmptyEntries)
    : fNEmptyEntries(nEmptyEntries), fNSlots(RDFInternal::GetNSlots()),
      fLoopType(ROOT::IsImplicitMTEnabled() ? ELoopType::kNoFilesMT : ELoopType::kNoFiles), fNewSampleNotifier(fNSlots),
-     fSampleInfos(fNSlots)
+     fSampleInfos(fNSlots), fDatasetColumnReaders(fNSlots)
 {
 }
 
 RLoopManager::RLoopManager(std::unique_ptr<RDataSource> ds, const ColumnNames_t &defaultBranches)
    : fDefaultColumns(defaultBranches), fNSlots(RDFInternal::GetNSlots()),
      fLoopType(ROOT::IsImplicitMTEnabled() ? ELoopType::kDataSourceMT : ELoopType::kDataSource),
-     fDataSource(std::move(ds)), fNewSampleNotifier(fNSlots), fSampleInfos(fNSlots)
+     fDataSource(std::move(ds)), fNewSampleNotifier(fNSlots), fSampleInfos(fNSlots), fDatasetColumnReaders(fNSlots)
 {
    fDataSource->SetNSlots(fNSlots);
 }
@@ -700,6 +708,13 @@ void RLoopManager::CleanUpTask(TTreeReader *r, unsigned int slot)
       ptr->FinalizeSlot(slot);
    for (auto &ptr : fBookedDefines)
       ptr->FinalizeSlot(slot);
+
+   if (fLoopType == ELoopType::kROOTFiles || fLoopType == ELoopType::kROOTFilesMT) {
+      // we are reading from a tree/chain and we need to re-create the RTreeColumnReaders at every task
+      // because the TTreeReader object changes at every task
+      for (auto &v : fDatasetColumnReaders[slot])
+         v.second.reset();
+   }
 }
 
 /// Add RDF nodes that require just-in-time compilation to the computation graph.
@@ -934,14 +949,52 @@ const ColumnNames_t &RLoopManager::GetBranchNames()
    return fValidBranchNames;
 }
 
-bool RLoopManager::HasDSValuePtrs(const std::string &col) const
+/// Return true if AddDataSourceColumnReaders was called for column name col.
+bool RLoopManager::HasDataSourceColumnReaders(const std::string &col, const std::type_info &ti) const
 {
-   return fDSValuePtrMap.find(col) != fDSValuePtrMap.end();
+   const auto key = MakeDatasetColReadersKey(col, ti);
+   assert(fDataSource != nullptr);
+   // since data source column readers are always added for all slots at the same time,
+   // if the reader is present for slot 0 we have it for all other slots as well.
+   return fDatasetColumnReaders[0].find(key) != fDatasetColumnReaders[0].end();
 }
 
-void RLoopManager::AddDSValuePtrs(const std::string &col, const std::vector<void *> ptrs)
+void RLoopManager::AddDataSourceColumnReaders(const std::string &col,
+                                              std::vector<std::unique_ptr<RColumnReaderBase>> &&readers,
+                                              const std::type_info &ti)
 {
-   fDSValuePtrMap[col] = ptrs;
+   const auto key = MakeDatasetColReadersKey(col, ti);
+   assert(fDataSource != nullptr && !HasDataSourceColumnReaders(col, ti));
+   assert(readers.size() == fNSlots);
+
+   for (auto slot = 0u; slot < fNSlots; ++slot) {
+      fDatasetColumnReaders[slot][key] = std::move(readers[slot]);
+   }
+}
+
+// Differently from AddDataSourceColumnReaders, this can be called from multiple threads concurrently
+/// \brief Register a new RTreeColumnReader with this RLoopManager.
+/// \return A shared pointer to the inserted column reader.
+std::shared_ptr<RColumnReaderBase> RLoopManager::AddTreeColumnReader(unsigned int slot, const std::string &col,
+                                                                     std::unique_ptr<RColumnReaderBase> &&reader,
+                                                                     const std::type_info &ti)
+{
+   auto &readers = fDatasetColumnReaders[slot];
+   const auto key = MakeDatasetColReadersKey(col, ti);
+   // if a reader for this column and this slot was already there, we are doing something wrong
+   assert(readers.find(key) == readers.end() || readers[key] == nullptr);
+   return readers[key] = std::move(reader);
+}
+
+std::shared_ptr<RColumnReaderBase>
+RLoopManager::GetDatasetColumnReader(unsigned int slot, const std::string &col, const std::type_info &ti) const
+{
+   const auto key = MakeDatasetColReadersKey(col, ti);
+   auto it = fDatasetColumnReaders[slot].find(key);
+   if (it != fDatasetColumnReaders[slot].end())
+      return it->second;
+   else
+      return nullptr;
 }
 
 void RLoopManager::AddSampleCallback(SampleCallback_t &&callback)

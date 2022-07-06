@@ -20,6 +20,9 @@
 #include <vector>
 
 namespace ROOT {
+namespace RDF {
+class RVariationsDescription;
+}
 namespace Detail {
 namespace RDF {
 class RDefineBase;
@@ -80,17 +83,13 @@ public:
    /// \brief Return the list of the names of the defined columns (Defines + Aliases).
    ColumnNames_t GetNames() const { return *fColumnNames; }
 
-   ////////////////////////////////////////////////////////////////////////////
-   /// \brief Return a map of pointers to the defined columns.
-   const DefinesMap_t &GetDefines() const { return *fDefines; }
+   ColumnNames_t BuildDefineNames() const;
 
-   ////////////////////////////////////////////////////////////////////////////
-   /// \brief Return the multimap of systematic variations, see fVariations.
-   const VariationsMap_t &GetVariations() const { return *fVariations; }
+   RDFDetail::RDefineBase *GetDefine(const std::string &colName) const;
 
    bool IsDefineOrAlias(std::string_view name) const;
 
-   void AddDefine(const std::shared_ptr<RDFDetail::RDefineBase> &column);
+   void AddDefine(std::shared_ptr<RDFDetail::RDefineBase> column);
 
    void AddAlias(std::string_view alias, std::string_view colName);
 
@@ -98,13 +97,15 @@ public:
 
    std::string ResolveAlias(std::string_view alias) const;
 
-   void AddVariation(const std::shared_ptr<RVariationBase> &variation);
+   void AddVariation(std::shared_ptr<RVariationBase> variation);
 
    std::vector<std::string> GetVariationsFor(const std::string &column) const;
 
    std::vector<std::string> GetVariationDeps(const std::string &column) const;
 
    std::vector<std::string> GetVariationDeps(const ColumnNames_t &columns) const;
+
+   ROOT::RDF::RVariationsDescription BuildVariationsDescription() const;
 
    RVariationBase &FindVariation(const std::string &colName, const std::string &variationName) const;
 };

@@ -9,6 +9,7 @@
 #include "ROOT/RDF/RColumnRegister.hxx"
 #include "ROOT/RDF/RDefineBase.hxx"
 #include "ROOT/RDF/RVariationBase.hxx"
+#include "ROOT/RDF/RVariationsDescription.hxx"
 #include "ROOT/RDF/Utils.hxx" // IsStrInVec
 
 #include <cassert>
@@ -31,6 +32,26 @@ RColumnRegister::~RColumnRegister()
 }
 
 ////////////////////////////////////////////////////////////////////////////
+/// \brief Return the list of the names of defined columns (no aliases).
+ColumnNames_t RColumnRegister::BuildDefineNames() const
+{
+   ColumnNames_t names;
+   names.reserve(fDefines->size());
+   for (auto &kv : *fDefines) {
+      names.emplace_back(kv.first);
+   }
+   return names;
+}
+
+////////////////////////////////////////////////////////////////////////////
+/// \brief Return the RDefine for the requested column name, or nullptr.
+RDFDetail::RDefineBase *RColumnRegister::GetDefine(const std::string &colName) const
+{
+   auto it = fDefines->find(colName);
+   return it == fDefines->end() ? nullptr : (it->second).get();
+}
+
+////////////////////////////////////////////////////////////////////////////
 /// \brief Check if the provided name is tracked in the names list
 bool RColumnRegister::IsDefineOrAlias(std::string_view name) const
 {
@@ -41,18 +62,18 @@ bool RColumnRegister::IsDefineOrAlias(std::string_view name) const
 ////////////////////////////////////////////////////////////////////////////
 /// \brief Add a new defined column.
 /// Internally it recreates the map with the new column, and swaps it with the old one.
-void RColumnRegister::AddDefine(const std::shared_ptr<RDFDetail::RDefineBase> &column)
+void RColumnRegister::AddDefine(std::shared_ptr<RDFDetail::RDefineBase> column)
 {
    auto newDefines = std::make_shared<DefinesMap_t>(*fDefines);
    const std::string &colName = column->GetName();
-   (*newDefines)[colName] = column;
+   (*newDefines)[colName] = std::move(column);
    fDefines = std::move(newDefines);
    AddName(colName);
 }
 
 ////////////////////////////////////////////////////////////////////////////
 /// \brief Register a new systematic variation.
-void RColumnRegister::AddVariation(const std::shared_ptr<RVariationBase> &variation)
+void RColumnRegister::AddVariation(std::shared_ptr<RVariationBase> variation)
 {
    auto newVariations = std::make_shared<VariationsMap_t>(*fVariations);
    const std::vector<std::string> &colNames = variation->GetColumnNames();
@@ -121,6 +142,16 @@ RVariationBase &RColumnRegister::FindVariation(const std::string &colName, const
       ++it;
    assert(it != range.second && "Could not find the variation you asked for. This should never happen.");
    return *it->second;
+}
+
+ROOT::RDF::RVariationsDescription RColumnRegister::BuildVariationsDescription() const
+{
+   std::set<const RVariationBase *> uniqueVariations;
+   for (auto &e : *fVariations)
+      uniqueVariations.insert(e.second.get());
+
+   const std::vector<const RVariationBase *> variations(uniqueVariations.begin(), uniqueVariations.end());
+   return ROOT::RDF::RVariationsDescription{variations};
 }
 
 ////////////////////////////////////////////////////////////////////////////
